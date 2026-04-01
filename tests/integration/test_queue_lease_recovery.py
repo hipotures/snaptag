@@ -15,6 +15,7 @@ from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
 def test_is_lease_expired_detects_expired_and_active_leases():
     now = datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc)
     assert is_lease_expired(now - timedelta(seconds=1), now=now) is True
+    assert is_lease_expired(now, now=now) is True
     assert is_lease_expired(now + timedelta(seconds=1), now=now) is False
 
 
@@ -97,6 +98,47 @@ def test_expired_processing_job_becomes_failed_terminal_when_attempts_reached(tm
         assert recovered_job.locked_at is None
         assert recovered_job.lease_until is None
         assert recovered_job.worker_id is None
+
+
+def test_non_expired_processing_job_remains_unchanged(tmp_path):
+    engine = _upgraded_engine(tmp_path)
+    now = datetime(2026, 4, 1, 14, 0, tzinfo=timezone.utc)
+    lease_until = now + timedelta(minutes=5)
+    original_available_at = now - timedelta(hours=1)
+    original_locked_at = now - timedelta(minutes=10)
+    original_worker_id = "worker-3"
+
+    with Session(engine) as session:
+        job = Job(
+            job_type="ingest",
+            target_type="asset",
+            target_id=3,
+            payload_json=None,
+            status="processing",
+            priority=0,
+            available_at=original_available_at,
+            locked_at=original_locked_at,
+            lease_until=lease_until,
+            worker_id=original_worker_id,
+            attempts=1,
+            max_attempts=3,
+            last_error=None,
+        )
+        session.add(job)
+        session.commit()
+        job_id = job.id
+
+    recovered_count = recover_expired_jobs(engine, now=now)
+    assert recovered_count == 0
+
+    with Session(engine) as session:
+        unchanged_job = session.get(Job, job_id)
+        assert unchanged_job is not None
+        assert unchanged_job.status == "processing"
+        assert _to_utc(unchanged_job.available_at) == original_available_at
+        assert _to_utc(unchanged_job.locked_at) == original_locked_at
+        assert _to_utc(unchanged_job.lease_until) == lease_until
+        assert unchanged_job.worker_id == original_worker_id
 
 
 def _upgraded_engine(tmp_path):

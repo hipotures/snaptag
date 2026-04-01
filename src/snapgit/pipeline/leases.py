@@ -14,4 +14,4 @@ def is_lease_expired(
         lease_until = lease_until.replace(tzinfo=timezone.utc)
     if reference_time.tzinfo is None:
         reference_time = reference_time.replace(tzinfo=timezone.utc)
-    return lease_until < reference_time
+    return lease_until <= reference_time
