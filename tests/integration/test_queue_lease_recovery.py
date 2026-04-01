@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from snapgit.domain.models import Job
 from snapgit.pipeline.leases import is_lease_expired
-from snapgit.pipeline.queue import recover_expired_jobs
+from snapgit.pipeline.queue import _recover_expired_jobs
 from snapgit.pipeline.retry import next_retry_attempt
 from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
 
@@ -50,7 +50,7 @@ def test_expired_processing_job_returns_to_retry_queue(tmp_path):
         session.commit()
         job_id = job.id
 
-    recovered_count = recover_expired_jobs(engine, now=now)
+    recovered_count = _recover_expired_jobs(engine, now=now)
     assert recovered_count == 1
 
     with Session(engine) as session:
@@ -87,7 +87,7 @@ def test_expired_processing_job_becomes_failed_terminal_when_attempts_reached(tm
         session.commit()
         job_id = job.id
 
-    recovered_count = recover_expired_jobs(engine, now=now)
+    recovered_count = _recover_expired_jobs(engine, now=now)
     assert recovered_count == 1
 
     with Session(engine) as session:
@@ -128,7 +128,7 @@ def test_non_expired_processing_job_remains_unchanged(tmp_path):
         session.commit()
         job_id = job.id
 
-    recovered_count = recover_expired_jobs(engine, now=now)
+    recovered_count = _recover_expired_jobs(engine, now=now)
     assert recovered_count == 0
 
     with Session(engine) as session:

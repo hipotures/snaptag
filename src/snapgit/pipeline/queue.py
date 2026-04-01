@@ -16,9 +16,14 @@ from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
 def recover_expired_jobs() -> int:
     db_engine = _default_engine()
     reference_time = datetime.now(timezone.utc)
+    return _recover_expired_jobs(db_engine, now=reference_time)
+
+
+def _recover_expired_jobs(engine: Engine, *, now: datetime | None = None) -> int:
+    reference_time = now or datetime.now(timezone.utc)
     recovered_count = 0
 
-    with Session(db_engine) as session:
+    with Session(engine) as session:
         processing_jobs = session.scalars(
             select(Job).where(Job.status == "processing", Job.lease_until.is_not(None))
         ).all()
