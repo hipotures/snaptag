@@ -1,6 +1,15 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -12,7 +21,7 @@ class Blob(Base):
     __tablename__ = "blobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True)
     storage_path: Mapped[str] = mapped_column(String(512))
     mime_type: Mapped[str] = mapped_column(String(255))
     size_bytes: Mapped[int] = mapped_column(Integer)
@@ -92,15 +101,21 @@ class Job(Base):
     target_id: Mapped[int] = mapped_column(Integer)
     payload_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32))
-    priority: Mapped[int] = mapped_column(Integer, default=0)
+    priority: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
     available_at: Mapped[datetime] = mapped_column(
         DateTime(), server_default=func.now(), nullable=False
     )
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
     worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    attempts: Mapped[int] = mapped_column(Integer, default=0)
-    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    attempts: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0")
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, default=3, server_default=text("3")
+    )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(), server_default=func.now(), nullable=False

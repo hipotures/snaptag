@@ -30,7 +30,6 @@ def upgrade() -> None:
         ),
         sa.UniqueConstraint("sha256", name="uq_blobs_sha256"),
     )
-    op.create_index("ix_blobs_sha256", "blobs", ["sha256"], unique=False)
 
     op.create_table(
         "assets",
@@ -164,5 +163,4 @@ def downgrade() -> None:
     op.drop_table("pipeline_runs")
     op.drop_index("ix_assets_blob_id", table_name="assets")
     op.drop_table("assets")
-    op.drop_index("ix_blobs_sha256", table_name="blobs")
     op.drop_table("blobs")
