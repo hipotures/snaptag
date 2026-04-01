@@ -1,52 +1,90 @@
-# SnapGit Backend Design (Phase 1)
+# SnapGit Backend Design (Phase 1, V2)
 
 ## 1. Context and Product Direction
 
 SnapGit is a local-first screenshot intelligence backend for one user.
-The input is a stream of screenshots (initially Android source, Linux backend).
-The backend must extract useful structure from screenshots and provide reliable retrieval and action suggestions.
+Input is a stream of screenshots (Android source, Linux backend).
+The system must transform screenshots into searchable, structured memory with optional action suggestions.
 
-This design intentionally optimizes for:
-- local deployment on one Linux machine,
-- sequential AI processing,
-- modular and independently testable components,
-- safe recovery after interruption,
-- future migration path from SQLite to PostgreSQL/MySQL.
+Phase 1 is intentionally constrained to:
+- one machine,
+- one user,
+- one sequential AI worker,
+- SQLite as canonical storage,
+- interruption-safe processing.
 
 ## 2. Goals
 
-- Build a backend foundation that supports screenshot ingest, analysis, indexing, and retrieval.
-- Keep modules isolated so each component can be tested independently.
-- Ensure pipeline execution is idempotent and restart-safe.
-- Use SQLite initially without locking the design to SQLite-specific queue tooling.
-- Keep architecture simple for fast iteration before Android frontend integration.
+- Build a reliable ingest-to-search backend for screenshots.
+- Keep modules independently testable with explicit boundaries.
+- Guarantee idempotent processing and safe recovery after crash/restart.
+- Keep data model migration-friendly (SQLite now, PostgreSQL/MySQL later).
+- Optimize for implementation speed without hidden architectural debt.
 
 ## 3. Non-Goals (Phase 1)
 
-- Multi-user accounts, authentication, tenant isolation.
-- Cloud-first deployment.
-- High-throughput parallel GPU inference.
-- Aggressive autonomous action execution without user confirmation.
-- Full production hardening for internet-exposed deployment.
+- Multi-user accounts and tenant isolation.
+- Cloud-first architecture.
+- Distributed workers or parallel GPU inference.
+- Autonomous action execution without confirmation.
+- Production-scale internet exposure hardening.
 
-## 4. High-Level Architecture
+## 4. Architecture Summary
 
-Recommended approach: **Modular monolith + local job queue**.
+Recommended architecture: **modular monolith + relational queue in SQLite**.
 
 Core modules:
-- `ingest`: receives screenshot payloads, validates input, stores files, deduplicates.
-- `pipeline`: orchestrates stage jobs and retries; contains no model logic.
-- `ocr`: text and layout extraction.
-- `vision`: screenshot-type classification and entity extraction via VLM.
-- `enrichment`: optional local enrichment of extracted entities.
-- `index`: normalized document build, embeddings, and indexing.
-- `search`: full-text + semantic retrieval + filters.
-- `actions`: confidence-based suggestion generation.
-- `api`: HTTP interface for ingest, browse, search, and action suggestions.
-- `storage`: file/object paths and relational persistence.
-- `observability`: logs, metrics, and pipeline event trace.
+- `ingest`: receive screenshot, validate input, store file, deduplicate.
+- `pipeline`: orchestration only (enqueue/dequeue/retry/lease), no model logic.
+- `ocr`: OCR and layout extraction.
+- `vision`: screenshot classification and entity extraction.
+- `enrichment`: optional best-effort enhancement of extracted entities.
+- `index`: build search projections (FTS documents) from canonical data.
+- `search`: retrieval over FTS + metadata filters.
+- `actions`: generate action suggestions only.
+- `api`: HTTP surface for ingest, browse, search, and suggestions.
+- `storage`: filesystem and relational persistence.
+- `observability`: logs and minimal metrics.
 
-## 5. Repository Structure
+## 5. Domain Model (Authoritative Separation)
+
+Four core entities are explicitly separated:
+
+1. `blob`
+- Physical file identity (content hash, path, size, mime).
+- Immutable once written.
+
+2. `asset`
+- Logical screenshot object in the product domain.
+- Points to one blob and carries source/capture metadata.
+- Stable identity across all reprocessing.
+
+3. `pipeline_run`
+- One execution instance of the pipeline for one asset.
+- Triggered by ingest, replay-stage, replay-all, or manual backfill.
+
+4. `job`
+- Ephemeral execution unit used by worker scheduling.
+- Jobs are not authoritative pipeline history.
+
+## 6. Canonical vs Derived State
+
+Canonical state (source of truth):
+- `blobs`
+- `assets`
+- `pipeline_runs`
+- `stage_results`
+- normalized extraction tables (`asset_ocr_blocks`, `asset_entities`, `asset_action_suggestions`)
+
+Derived state (rebuildable projections):
+- FTS tables / search projections
+- optional embedding artifacts (future)
+- cached enrichment responses
+- operational metrics aggregates
+
+Rule: derived state can be dropped and rebuilt from canonical state.
+
+## 7. Repository Structure
 
 ```text
 snapgit/
@@ -83,9 +121,6 @@ snapgit/
 
   src/
     snapgit/
-      __init__.py
-      main.py
-
       api/
         app.py
         deps.py
@@ -103,11 +138,11 @@ snapgit/
         repository.py
 
       pipeline/
-        events.py
-        jobs.py
         orchestrator.py
+        queue.py
         retry.py
-        dead_letter.py
+        leases.py
+        events.py
 
       ocr/
         service.py
@@ -126,16 +161,14 @@ snapgit/
 
       enrichment/
         service.py
-        providers/
-          github_local.py
-          hf_local.py
+        resolvers/
+          github.py
+          huggingface.py
         cache.py
 
       index/
         service.py
-        embedding.py
-        vector_store.py
-        text_index.py
+        fts_projection.py
 
       search/
         service.py
@@ -144,7 +177,6 @@ snapgit/
 
       actions/
         service.py
-        rules.py
         suggestions.py
 
       storage/
@@ -166,7 +198,6 @@ snapgit/
 
       observability/
         metrics.py
-        tracing.py
 
   tests/
     unit/
@@ -178,34 +209,73 @@ snapgit/
       vision_outputs/
 ```
 
-## 6. Data and Queue Model
+## 8. Persistence Stack and SQLite Baseline
 
-Persistence stack:
-- **SQLAlchemy 2.x** for data access and domain mapping.
-- **Alembic** for migrations from day one.
-- **SQLite** as initial database backend.
+- ORM/data layer: **SQLAlchemy 2.x**.
+- Migrations: **Alembic** from day one.
+- Database backend in Phase 1: **SQLite**.
 
-Queue model:
-- Queue is implemented as regular relational tables, not a SQLite-only queue library.
-- This keeps queue and metadata in one data model and simplifies migration later.
+Required SQLite baseline:
+- WAL mode enabled.
+- Busy timeout configured.
+- Deterministic transaction boundaries.
+- Indexes for queue fetch and key lookups.
 
-Primary tables:
-- `assets`: screenshot metadata and lifecycle state.
-- `jobs`: pipeline jobs.
-- `asset_ocr_blocks`: OCR output blocks and bounding boxes.
-- `asset_entities`: extracted entities from OCR/VLM stages.
-- `asset_actions`: generated action suggestions.
-- `asset_embeddings`: embedding vectors and model version metadata.
-- `pipeline_events`: append-only stage events for debugging and replay visibility.
+## 9. Data Model (Phase 1)
 
-Minimal `jobs` columns:
+### 9.1 Core tables
+
+`blobs`
+- `id`
+- `sha256` (unique)
+- `storage_path`
+- `mime_type`
+- `size_bytes`
+- `created_at`
+
+`assets`
+- `id`
+- `blob_id`
+- `source_type` (android_upload, backfill_folder, etc.)
+- `captured_at`
+- `ingested_at`
+- `state` (`ingested`, `processing`, `searchable`, `failed`)
+- `created_at`
+- `updated_at`
+
+`pipeline_runs`
 - `id`
 - `asset_id`
+- `trigger_type` (`ingest`, `replay_stage`, `replay_all`, `manual`)
+- `pipeline_version`
+- `config_hash`
+- `status` (`running`, `completed`, `failed`)
+- `started_at`
+- `finished_at`
+
+`stage_results`
+- `id`
+- `pipeline_run_id`
+- `asset_id`
+- `stage_name` (`ocr`, `vision`, `enrichment`, `index`, `actions`)
+- `stage_version`
+- `input_hash`
+- `output_hash`
+- `status` (`running`, `completed`, `failed`, `skipped`)
+- `artifact_ref`
+- `error`
+- `started_at`
+- `finished_at`
+
+`jobs`
+- `id`
 - `job_type`
-- `status` (`queued`, `processing`, `retry`, `done`, `failed`)
+- `target_type` (`asset`, `pipeline_run`, `stage_result`)
+- `target_id`
+- `payload_json`
+- `status` (`queued`, `processing`, `retry`, `done`, `failed_terminal`)
 - `priority`
 - `available_at`
-- `locked_at`
 - `lease_until`
 - `attempts`
 - `max_attempts`
@@ -213,89 +283,155 @@ Minimal `jobs` columns:
 - `created_at`
 - `updated_at`
 
-Recommended SQLite runtime settings:
-- WAL mode enabled.
-- Busy timeout configured.
-- Indexes for job fetch path (for example by status and availability).
+### 9.2 Stage output tables
 
-## 7. Processing Semantics
+`asset_ocr_blocks`
+- OCR text blocks and bounding boxes.
+- Version-linked through `stage_result_id`.
 
-Execution assumptions:
-- One ingest path, one sequential AI worker in Phase 1.
-- Jobs can accumulate; processing remains one-by-one by design.
+`asset_entities`
+- normalized entities (`type`, `value`, `confidence`, provenance).
+- Version-linked through `stage_result_id`.
 
-Reliability contract:
-- Pipeline is **at-least-once** at the job level.
-- Each stage is **idempotent**.
-- Any process interruption must be recoverable without critical system failure.
+`asset_action_suggestions`
+- suggested actions only (`action_type`, `payload_json`, `confidence`, `requires_confirmation`).
+- Version-linked through `stage_result_id`.
 
-Restart behavior:
-- Worker uses lease semantics (`lease_until`).
-- If worker crashes, stale jobs return to queue after lease expiry.
-- On restart, worker resumes from valid checkpoint state.
+`pipeline_events`
+- append-only diagnostics.
+- Not authoritative system state.
 
-Idempotency strategy:
-- Stage outputs are written with deterministic keys (`asset_id`, `stage`, `stage_version`).
-- Writes use transactional upsert semantics.
-- Before running a stage, worker checks if current-version result already exists.
-- Existing valid result short-circuits duplicate recomputation.
+## 10. Queue and Pipeline Semantics
 
-Modes of execution:
-- `resume` (default): execute only missing stages.
-- `replay-stage`: re-run exactly one stage with current config/version.
-- `replay-all`: full pipeline recompute with a new run identifier.
+Queue role is strictly execution orchestration.
+Pipeline truth is represented by `pipeline_runs` and `stage_results`.
 
-## 8. API Surface (Phase 1)
+Execution model:
+- at-least-once at the job level,
+- sequential worker,
+- stage-level idempotency.
 
-Planned endpoint categories:
-- Health and diagnostics.
-- Screenshot ingest.
-- Asset listing and detail retrieval.
-- Search (keyword, semantic, filtered).
-- Action suggestions retrieval and confirmation flow.
+Lease/recovery:
+- worker acquires one job,
+- sets `processing` + `lease_until`,
+- crash leaves job recoverable after lease expiration,
+- restart continues from canonical state.
 
-API should remain thin:
-- orchestration in API layer,
-- business logic in module services,
-- persistence via storage/domain abstractions.
+## 11. Idempotency and Replay
 
-## 9. Testing Strategy
+Idempotency key shape:
+- `(asset_id, stage_name, stage_version, input_hash)`.
 
-- Unit tests per module service with adapter fakes.
-- Integration tests per module boundary (for example ingest->pipeline, pipeline->ocr).
-- E2E tests for complete flow from ingest to searchable asset.
-- Fixture-driven regression tests based on real screenshot corpus.
+Rule:
+- same key must not create semantically duplicated output.
 
-Verification priorities:
-- Idempotent re-run behavior.
-- Resume after forced interruption.
-- Deterministic extraction for stable fixtures.
-- Search quality smoke checks on known examples.
+Modes:
+- `resume`: run only missing or stale stages.
+- `replay-stage`: re-execute one stage with current version/config.
+- `replay-all`: create new `pipeline_run` and recompute full chain.
 
-## 10. Observability and Operability
+## 12. Dedup Strategy
 
-- Structured JSON logs per pipeline stage.
-- Correlation by `asset_id`, `job_id`, `pipeline_run_id`.
-- Metrics for queue depth, stage latency, success/failure rates, retries.
-- Dead-letter visibility for exhausted jobs.
+Phase 1 dedup is binary and deterministic:
+- dedup key = file content `sha256` in `blobs`.
 
-## 11. Evolution Path
+Behavior on duplicate upload:
+- existing blob is reused,
+- new asset may still be created if capture context is different.
 
-Phase 1 starts with SQLite and local-only execution.
-When needed, migration path is:
-1. Keep SQLAlchemy models and Alembic history.
-2. Switch DSN from SQLite to PostgreSQL/MySQL.
-3. Re-tune transaction/locking assumptions.
-4. Scale worker count if model throughput justifies it.
+Perceptual dedup is explicitly out of scope for Phase 1.
 
-This preserves architecture and module boundaries while changing only operational backend details.
+## 13. Search Strategy (Phase 1)
 
-## 12. Final Design Decisions
+Default search stack: **SQLite + FTS5 + metadata filters**.
 
-- Local-only backend on Linux for initial phase.
+No external vector database in Phase 1.
+No mandatory embedding pipeline in Phase 1.
+
+FTS document projection combines:
+- OCR normalized text,
+- selected entity values,
+- concise summary/title fields,
+- optional aliases.
+
+Ranking:
+- BM25 from FTS5,
+- optional metadata boosts in ranking layer.
+
+Future vector search is additive and must remain derived/rebuildable.
+
+## 14. Enrichment and Actions Scope
+
+Enrichment behavior:
+- optional,
+- non-blocking,
+- best-effort,
+- failure does not block base searchability.
+
+Actions behavior in Phase 1:
+- suggestion generation only,
+- no autonomous external side effects,
+- confirmation-required model supported via flag.
+
+## 15. Versioning Rules
+
+`stage_version` must be deterministic and auditable.
+Recommended composition:
+- `model_version`
+- `prompt_version`
+- `code_version`
+- `config_hash`
+
+Any change in these inputs should produce a new effective stage version.
+
+## 16. Failure Classes and Retry Policy
+
+Failure classes:
+- transient I/O (retry)
+- model runtime transient (retry)
+- deterministic unsupported input (no retry)
+- corrupted payload (no retry)
+- enrichment timeout/error (retry-limited, non-blocking)
+- index projection failure (retry)
+
+Retry policy:
+- bounded retries with backoff,
+- after max attempts -> `failed_terminal`,
+- manual replay entry points remain available.
+
+## 17. Domain Invariants
+
+1. `asset_id` is stable across all pipeline runs.
+2. Jobs may execute more than once; stage writes must be idempotent.
+3. `pipeline_events` are diagnostic, not authoritative.
+4. Search projections are derived and rebuildable.
+5. Worker crash must never permanently block queue progress.
+6. Enrichment failure must not block base asset retrieval.
+
+## 18. Testing Strategy
+
+- Unit tests per module service and adapter boundaries.
+- Integration tests for ingest->pipeline->stage transitions.
+- E2E tests for ingest to searchable asset.
+- Crash/restart tests for lease recovery and resume.
+- Replay tests validating deterministic reprocessing semantics.
+- Fixture-based regression set from real screenshots.
+
+## 19. Evolution Path
+
+Near-term evolution order:
+1. Stabilize canonical schema and replay behavior.
+2. Add richer ranking and entity normalization.
+3. Add optional semantic retrieval only if FTS recall is insufficient.
+4. If needed, migrate DB backend to PostgreSQL/MySQL via SQLAlchemy/Alembic.
+
+## 20. Final Decisions (Accepted)
+
+- Local-only Linux backend in Phase 1.
 - Single-user architecture.
-- Near real-time ingestion with sequential processing.
-- Modular monolith with strict component boundaries.
+- Sequential processing with one worker.
 - SQLite + SQLAlchemy 2.x + Alembic.
-- Queue as relational tables in same DB as metadata.
-- Pipeline is interruption-safe and idempotent with resume/replay modes.
+- Relational queue in same DB as metadata.
+- Explicit separation: blob, asset, pipeline_run, stage_result, job.
+- Idempotent, interruption-safe pipeline with resume/replay.
+- Search starts with SQLite FTS5 and metadata filters.
