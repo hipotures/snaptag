@@ -1,8 +1,18 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
+
+from snapgit.common.settings import Settings
+from snapgit.domain.models import Asset, PipelineRun
+from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
+
 TERMINAL_RUN_STATUSES = {"completed", "failed"}
 RUN_TIMESTAMP_FIELDS = ("finished_at", "started_at", "created_at", "updated_at")
 RUN_ID_FIELDS = ("id", "run_id", "pipeline_run_id")
+DEFAULT_PIPELINE_VERSION = "baseline-v1"
+DEFAULT_CONFIG_HASH = "0" * 64
 
 
 def _is_maintenance_only_run(run: dict) -> bool:
@@ -85,3 +95,37 @@ def latest_effective_run_status(runs: list[dict]) -> str | None:
         effective_terminal_runs,
         key=lambda entry: _run_sort_key(entry[0]),
     )[1]
+
+
+def replay_all(asset_id: int, *, engine: Engine | None = None) -> int:
+    db_engine = engine or _default_engine()
+
+    with Session(db_engine) as session:
+        asset = session.get(Asset, asset_id)
+        if asset is None:
+            raise ValueError(f"asset_id={asset_id} does not exist")
+
+        latest_run = session.scalars(
+            select(PipelineRun)
+            .where(PipelineRun.asset_id == asset_id)
+            .order_by(PipelineRun.id.desc())
+            .limit(1)
+        ).first()
+
+        replay_run = PipelineRun(
+            asset_id=asset_id,
+            trigger_type="replay_all",
+            pipeline_version=(
+                latest_run.pipeline_version if latest_run else DEFAULT_PIPELINE_VERSION
+            ),
+            config_hash=latest_run.config_hash if latest_run else DEFAULT_CONFIG_HASH,
+            status="running",
+        )
+        session.add(replay_run)
+        session.commit()
+        return replay_run.id
+
+
+def _default_engine() -> Engine:
+    settings = Settings()
+    return create_engine_with_sqlite_pragmas(settings.database_url)

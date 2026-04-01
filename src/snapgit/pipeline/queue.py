@@ -6,16 +6,21 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from snapgit.common.settings import Settings
 from snapgit.domain.models import Job
 from snapgit.pipeline.leases import is_lease_expired
 from snapgit.pipeline.retry import next_retry_attempt
+from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
 
 
-def recover_expired_jobs(engine: Engine, *, now: datetime | None = None) -> int:
+def recover_expired_jobs(
+    engine: Engine | None = None, *, now: datetime | None = None
+) -> int:
+    db_engine = engine or _default_engine()
     reference_time = now or datetime.now(timezone.utc)
     recovered_count = 0
 
-    with Session(engine) as session:
+    with Session(db_engine) as session:
         processing_jobs = session.scalars(
             select(Job).where(Job.status == "processing", Job.lease_until.is_not(None))
         ).all()
@@ -35,3 +40,8 @@ def recover_expired_jobs(engine: Engine, *, now: datetime | None = None) -> int:
             session.commit()
 
     return recovered_count
+
+
+def _default_engine() -> Engine:
+    settings = Settings()
+    return create_engine_with_sqlite_pragmas(settings.database_url)
