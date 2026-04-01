@@ -18,16 +18,6 @@ def run_ocr_stage(
         connection.execute(
             text(
                 """
-                CREATE TABLE IF NOT EXISTS asset_ocr_texts (
-                    asset_id INTEGER PRIMARY KEY,
-                    ocr_text TEXT NOT NULL
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                """
                 INSERT INTO asset_ocr_texts (asset_id, ocr_text)
                 VALUES (:asset_id, :ocr_text)
                 ON CONFLICT(asset_id) DO UPDATE SET

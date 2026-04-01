@@ -20,7 +20,7 @@ def test_initial_tables_exist_after_alembic_upgrade(tmp_path):
     insp = inspect(engine)
     names = set(insp.get_table_names())
 
-    assert {"blobs", "assets", "pipeline_runs", "stage_results", "jobs"} <= names
+    assert {"blobs", "assets", "pipeline_runs", "asset_ocr_texts", "stage_results", "jobs"} <= names
 
     blob_indexes = insp.get_indexes("blobs")
     assert all(index["name"] != "ix_blobs_sha256" for index in blob_indexes)

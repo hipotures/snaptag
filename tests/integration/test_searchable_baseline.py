@@ -135,7 +135,7 @@ def test_ocr_stage_rejects_pipeline_run_asset_mismatch(tmp_path):
             {"run_id": pipeline_run_id},
         ).scalar_one()
         ocr_rows_count = connection.execute(
-            text("SELECT COUNT(*) FROM sqlite_master WHERE name = 'asset_ocr_texts'"),
+            text("SELECT COUNT(*) FROM asset_ocr_texts"),
         ).scalar_one()
 
     assert stage_results_count == 0

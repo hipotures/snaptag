@@ -68,6 +68,16 @@ class PipelineRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(), nullable=True)
 
 
+class AssetOcrText(Base):
+    __tablename__ = "asset_ocr_texts"
+
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    ocr_text: Mapped[str] = mapped_column(Text)
+
+
 class StageResult(Base):
     __tablename__ = "stage_results"
     __table_args__ = (

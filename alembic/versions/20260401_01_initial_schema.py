@@ -82,6 +82,13 @@ def upgrade() -> None:
     op.create_index("ix_pipeline_runs_asset_id", "pipeline_runs", ["asset_id"], unique=False)
 
     op.create_table(
+        "asset_ocr_texts",
+        sa.Column("asset_id", sa.Integer(), primary_key=True),
+        sa.Column("ocr_text", sa.Text(), nullable=False),
+        sa.ForeignKeyConstraint(["asset_id"], ["assets.id"], ondelete="CASCADE"),
+    )
+
+    op.create_table(
         "stage_results",
         sa.Column("id", sa.Integer(), primary_key=True),
         sa.Column("pipeline_run_id", sa.Integer(), nullable=False),
@@ -159,6 +166,7 @@ def downgrade() -> None:
     op.drop_index("ix_stage_results_pipeline_run_id", table_name="stage_results")
     op.drop_index("ix_stage_results_asset_id", table_name="stage_results")
     op.drop_table("stage_results")
+    op.drop_table("asset_ocr_texts")
     op.drop_index("ix_pipeline_runs_asset_id", table_name="pipeline_runs")
     op.drop_table("pipeline_runs")
     op.drop_index("ix_assets_blob_id", table_name="assets")
