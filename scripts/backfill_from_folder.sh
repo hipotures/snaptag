@@ -16,10 +16,11 @@ fi
 
 for screenshot_path in "$folder_path"/*; do
   if [ -f "$screenshot_path" ]; then
-    curl -sS \
+    payload="$(SNAPGIT_PATH="$screenshot_path" python3 -c 'import json, os; print(json.dumps({"source_type": "filesystem_backfill", "path": os.environ["SNAPGIT_PATH"]}))')"
+    curl --fail --silent --show-error \
       -X POST \
       -H "Content-Type: application/json" \
-      -d "{\"source_type\":\"filesystem_backfill\",\"path\":\"$screenshot_path\"}" \
+      -d "$payload" \
       "$api_base_url/ingest"
     echo
   fi
