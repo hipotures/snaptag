@@ -15,6 +15,6 @@ def choose_captured_at(
         source_file_mtime,
         ingested_at,
     ):
-        if candidate is not None:
+        if candidate not in (None, ""):
             return candidate
     return None
