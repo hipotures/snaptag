@@ -73,3 +73,6 @@ htmlcov/
 
 # Local codex state
 .codex
+
+# Local git worktrees
+.worktrees/
