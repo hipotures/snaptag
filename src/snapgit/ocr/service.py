@@ -13,6 +13,8 @@ def run_ocr_stage(
     stage_version: str = "baseline-v1",
 ) -> None:
     with engine.begin() as connection:
+        _validate_pipeline_run_asset(connection, pipeline_run_id, asset_id)
+
         connection.execute(
             text(
                 """
@@ -69,4 +71,22 @@ def run_ocr_stage(
                 "stage_version": stage_version,
                 "artifact_ref": f"asset_ocr_texts:{asset_id}",
             },
+        )
+
+
+def _validate_pipeline_run_asset(connection, pipeline_run_id: int, asset_id: int) -> None:
+    run_exists = connection.execute(
+        text(
+            """
+            SELECT 1
+            FROM pipeline_runs
+            WHERE id = :pipeline_run_id AND asset_id = :asset_id
+            """
+        ),
+        {"pipeline_run_id": pipeline_run_id, "asset_id": asset_id},
+    ).fetchone()
+
+    if run_exists is None:
+        raise ValueError(
+            f"pipeline_run_id={pipeline_run_id} does not belong to asset_id={asset_id}"
         )
