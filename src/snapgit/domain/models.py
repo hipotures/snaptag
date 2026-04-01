@@ -12,6 +12,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+STAGE_RESULT_UNIQUE_CONSTRAINT_NAME = "uq_stage_results_pipeline_run_stage_name"
+
 
 class Base(DeclarativeBase):
     pass
@@ -69,9 +71,7 @@ class PipelineRun(Base):
 class StageResult(Base):
     __tablename__ = "stage_results"
     __table_args__ = (
-        UniqueConstraint(
-            "pipeline_run_id", "stage_name", name="uq_stage_results_pipeline_run_stage_name"
-        ),
+        UniqueConstraint("pipeline_run_id", "stage_name", name=STAGE_RESULT_UNIQUE_CONSTRAINT_NAME),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
