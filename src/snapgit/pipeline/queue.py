@@ -13,11 +13,9 @@ from snapgit.pipeline.retry import next_retry_attempt
 from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
 
 
-def recover_expired_jobs(
-    engine: Engine | None = None, *, now: datetime | None = None
-) -> int:
-    db_engine = engine or _default_engine()
-    reference_time = now or datetime.now(timezone.utc)
+def recover_expired_jobs() -> int:
+    db_engine = _default_engine()
+    reference_time = datetime.now(timezone.utc)
     recovered_count = 0
 
     with Session(db_engine) as session:

@@ -6,12 +6,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from snapgit.domain.models import Asset, Blob, PipelineRun
+import snapgit.pipeline.orchestrator as orchestrator_module
 from snapgit.pipeline.orchestrator import replay_all
 from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
 
 
-def test_replay_all_creates_new_pipeline_run(tmp_path):
+def test_replay_all_creates_new_pipeline_run(tmp_path, monkeypatch):
     engine = _upgraded_engine(tmp_path)
+    database_url = str(engine.url)
+
+    monkeypatch.setattr(
+        orchestrator_module,
+        "Settings",
+        lambda: type("SettingsOverride", (), {"database_url": database_url})(),
+    )
 
     with Session(engine) as session:
         blob = Blob(
@@ -40,7 +48,7 @@ def test_replay_all_creates_new_pipeline_run(tmp_path):
         asset_id = asset.id
         initial_run_id = initial_run.id
 
-    new_run_id = replay_all(asset_id=asset_id, engine=engine)
+    new_run_id = replay_all(asset_id=asset_id)
 
     assert isinstance(new_run_id, int)
     assert new_run_id != initial_run_id

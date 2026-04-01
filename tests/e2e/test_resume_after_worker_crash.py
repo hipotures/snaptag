@@ -9,14 +9,20 @@ from sqlalchemy.orm import Session
 from snapgit.domain.models import Asset, Blob, Job, PipelineRun
 from snapgit.index.service import run_index_stage
 from snapgit.ocr.service import run_ocr_stage
+import snapgit.pipeline.queue as queue_module
 from snapgit.pipeline.queue import recover_expired_jobs
 from snapgit.search.service import search_asset_ids
 from snapgit.storage.metadata_db import create_engine_with_sqlite_pragmas
 
 
-def test_resume_after_crash_recovers_expired_lease_and_completes(tmp_path):
+def test_resume_after_crash_recovers_expired_lease_and_completes(tmp_path, monkeypatch):
     engine = _upgraded_engine(tmp_path)
-    now = datetime(2026, 4, 1, 18, 0, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    database_url = str(engine.url)
+
+    monkeypatch.setattr(
+        queue_module, "Settings", lambda: type("SettingsOverride", (), {"database_url": database_url})()
+    )
 
     with Session(engine) as session:
         blob = Blob(
@@ -66,14 +72,14 @@ def test_resume_after_crash_recovers_expired_lease_and_completes(tmp_path):
 
     assert search_asset_ids(engine, "parking") == []
 
-    recovered_count = recover_expired_jobs(engine, now=now)
+    recovered_count = recover_expired_jobs()
     assert recovered_count == 1
 
     with Session(engine) as session:
         recovered_job = session.get(Job, job_id)
         assert recovered_job is not None
         assert recovered_job.status == "retry"
-        assert _to_utc(recovered_job.available_at) == now
+        assert _to_utc(recovered_job.available_at) >= now
         assert recovered_job.locked_at is None
         assert recovered_job.lease_until is None
         assert recovered_job.worker_id is None

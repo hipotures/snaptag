@@ -97,8 +97,8 @@ def latest_effective_run_status(runs: list[dict]) -> str | None:
     )[1]
 
 
-def replay_all(asset_id: int, *, engine: Engine | None = None) -> int:
-    db_engine = engine or _default_engine()
+def replay_all(asset_id: int) -> int:
+    db_engine = _default_engine()
 
     with Session(db_engine) as session:
         asset = session.get(Asset, asset_id)
