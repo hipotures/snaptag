@@ -1,4 +1,4 @@
-# SnapGit Backend Design (Phase 1, V2.1)
+# SnapGit Backend Design (Phase 1, V2.2)
 
 ## 1. Context and Product Direction
 
@@ -61,7 +61,7 @@ Four core entities are explicitly separated:
 
 3. `pipeline_run`
 - One execution instance of the pipeline for one asset.
-- Triggered by ingest, replay-stage, replay-all, manual backfill, or maintenance operations.
+- Triggered by ingest, replay-stage, replay-all, backfill, or maintenance operations.
 
 4. `job`
 - Ephemeral execution unit used by worker scheduling.
@@ -218,6 +218,8 @@ snapgit/
 Required SQLite baseline:
 - WAL mode enabled.
 - Busy timeout configured.
+- Foreign key enforcement enabled.
+- Canonical parent rows should default to restrictive delete/update policies; derived children may cascade where rebuild is safe.
 - Deterministic transaction boundaries.
 - Indexes for queue fetch and key lookups.
 
@@ -238,15 +240,22 @@ Required SQLite baseline:
 - `blob_id`
 - `source_type` (`android_upload`, `backfill_folder`, etc.)
 - `captured_at`
+- `source_file_mtime`
+- `embedded_metadata_json`
 - `ingested_at`
 - `state` (`ingested`, `processing`, `searchable`, `failed`)
 - `created_at`
 - `updated_at`
 
+Metadata note:
+- `embedded_metadata_json` is optional raw metadata extracted from the source file when available.
+- It may contain EXIF, PNG text chunks, or platform-specific image metadata.
+- It is informational only unless promoted by explicit timestamp rules.
+
 `pipeline_runs`
 - `id`
 - `asset_id`
-- `trigger_type` (`ingest`, `replay_stage`, `replay_all`, `backfill`, `manual`)
+- `trigger_type` (`ingest`, `replay_stage`, `replay_all`, `backfill`, `maintenance`, `manual`)
 - `pipeline_version`
 - `config_hash`
 - `status` (`running`, `completed`, `failed`)
@@ -267,6 +276,10 @@ Required SQLite baseline:
 - `started_at`
 - `finished_at`
 
+Semantic constraint:
+- at most one `stage_result` per (`pipeline_run_id`, `stage_name`)
+- retry updates the same stage result record in Phase 1
+
 `jobs`
 - `id`
 - `job_type`
@@ -276,7 +289,9 @@ Required SQLite baseline:
 - `status` (`queued`, `processing`, `retry`, `done`, `failed_terminal`)
 - `priority`
 - `available_at`
+- `locked_at`
 - `lease_until`
+- `worker_id`
 - `attempts`
 - `max_attempts`
 - `last_error`
@@ -306,6 +321,11 @@ Required SQLite baseline:
 
 `asset.state` is a **materialized summary field** for fast API/UI access.
 Authoritative progress is derived from latest effective `pipeline_runs` + `stage_results`.
+
+`latest effective run` means:
+- the most recent `pipeline_run` for an asset with terminal status `completed` or `failed`
+- excluding abandoned in-progress runs whose lease/recovery state has not been finalized
+- excluding maintenance-only runs that do not change searchable baseline semantics
 
 `asset.state` transition intent:
 - `ingested`: asset persisted, no active run yet.
@@ -358,6 +378,7 @@ Idempotency key shape:
 Behavior:
 - if a compatible prior result exists, stage may be marked `skipped` with reused `artifact_ref`.
 - otherwise, stage computes and writes a new result for the current run.
+- `skipped` is valid only when a previous compatible result is reused without recomputation.
 
 ## 14. Artifact Reference Contract
 
@@ -367,6 +388,7 @@ Storage rule:
 - normalized queryable outputs go to relational tables,
 - large raw model payloads go to artifact files,
 - `artifact_ref` points to artifact path (relative to repository root or storage root).
+- on reuse, `artifact_ref` points to the producing artifact and is not required to be run-local.
 
 ## 15. Dedup Strategy
 
@@ -441,10 +463,10 @@ Retry policy:
 
 Mandatory stages (gating):
 - `ocr`: input blob path -> canonical `asset_ocr_blocks` + stage result.
-- `index`: input normalized extraction -> derived FTS projection + stage result.
+- `index`: baseline input is OCR output + core asset fields -> derived FTS projection + stage result.
 
 Optional stages (non-gating):
-- `vision`: classification/entities enrichment of canonical extraction data.
+- `vision`: classification and entity extraction from screenshot content.
 - `enrichment`: resolver-based metadata enhancement.
 - `actions`: generate suggestions for downstream confirmation.
 
@@ -454,6 +476,11 @@ Each stage defines:
 - derived writes,
 - retryable error classes,
 - gating flag.
+
+Phase 1 stage DAG:
+- baseline searchability path: `ingest -> ocr -> index`
+- optional quality path: `vision -> enrichment -> reindex(asset_id)` when new searchable fields are produced
+- optional action path: `vision/enrichment -> actions`
 
 ## 21. Rebuild Operations
 
@@ -477,9 +504,16 @@ All rebuild operations must preserve canonical state and only rewrite derived pr
 Backfill ingestion uses `trigger_type=backfill`.
 
 Backfill rules:
-- file mtime may map to `captured_at` when explicit capture timestamp is unavailable,
+- `source_file_mtime` stores raw filesystem observation from the backfill source,
+- `captured_at` is the best known capture time derived from source priority rules,
 - duplicate blobs reuse existing blob records,
 - a new asset may still be created for each capture event context.
+
+Timestamp priority for `captured_at`:
+- explicit ingest payload capture time
+- embedded metadata timestamp
+- `source_file_mtime`
+- `ingested_at`
 
 ## 24. Domain Invariants
 
@@ -490,6 +524,7 @@ Backfill rules:
 5. Worker crash must never permanently block queue progress.
 6. Enrichment failure must not block base asset retrieval.
 7. Asset searchability depends on mandatory baseline stages only.
+8. `captured_at` is best-effort inferred time, while `source_file_mtime` remains raw source observation.
 
 ## 25. Testing Strategy
 
