@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import csv
 import glob
 import json
@@ -317,6 +318,120 @@ def _lookup_ground_truth(mapping: Mapping[str, str], image_path: Path) -> str | 
     return None
 
 
+def _load_per_image_csv(path: Path) -> dict[str, dict[str, str]]:
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return {row["image_name"]: row for row in csv.DictReader(handle)}
+
+
+_TOKEN_PATTERN = re.compile(r"[0-9A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]+", re.UNICODE)
+_STOPWORDS = {
+    "oraz",
+    "który",
+    "która",
+    "które",
+    "jest",
+    "się",
+    "żeby",
+    "that",
+    "this",
+    "with",
+    "from",
+    "have",
+    "your",
+    "jego",
+    "jej",
+    "dla",
+    "the",
+    "and",
+    "czy",
+    "or",
+    "ale",
+    "nie",
+    "tak",
+    "to",
+    "na",
+    "w",
+    "z",
+    "do",
+    "po",
+    "za",
+    "od",
+    "we",
+    "o",
+    "u",
+    "a",
+    "i",
+}
+
+
+def _normalize_for_tokens(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _tokens(text: str) -> list[str]:
+    return _TOKEN_PATTERN.findall(_normalize_for_tokens(text))
+
+
+def _keywords(tokens: list[str]) -> list[str]:
+    return [token for token in tokens if len(token) >= 5 and token not in _STOPWORDS]
+
+
+def compute_reference_overlap_metrics(
+    reference_rows: Mapping[str, Mapping[str, str]],
+    candidate_rows: Mapping[str, Mapping[str, str]],
+) -> dict[str, float | int | None]:
+    ref_tokens_all: list[str] = []
+    cand_tokens_all: list[str] = []
+    ref_keywords_all: list[str] = []
+    cand_keywords_all: list[str] = []
+    shared_images = 0
+
+    for image_name in sorted(set(reference_rows) & set(candidate_rows)):
+        ref_row = reference_rows[image_name]
+        cand_row = candidate_rows[image_name]
+        if ref_row.get("status") != "ok" or cand_row.get("status") != "ok":
+            continue
+        shared_images += 1
+        ref_tokens = _tokens(str(ref_row.get("predicted_text", "")))
+        cand_tokens = _tokens(str(cand_row.get("predicted_text", "")))
+        ref_tokens_all.extend(ref_tokens)
+        cand_tokens_all.extend(cand_tokens)
+        ref_keywords_all.extend(_keywords(ref_tokens))
+        cand_keywords_all.extend(_keywords(cand_tokens))
+
+    if not ref_tokens_all or not cand_tokens_all:
+        return {
+            "reference_shared_images": shared_images,
+            "reference_token_recall": None,
+            "reference_token_precision": None,
+            "reference_keyword_recall": None,
+            "reference_tokens": len(ref_tokens_all),
+            "candidate_tokens": len(cand_tokens_all),
+        }
+
+    ref_counter = collections.Counter(ref_tokens_all)
+    cand_counter = collections.Counter(cand_tokens_all)
+    overlap = sum(min(ref_counter[token], cand_counter[token]) for token in ref_counter)
+    token_recall = overlap / sum(ref_counter.values())
+    token_precision = overlap / sum(cand_counter.values())
+
+    ref_kw_counter = collections.Counter(ref_keywords_all)
+    cand_kw_counter = collections.Counter(cand_keywords_all)
+    kw_overlap = sum(min(ref_kw_counter[token], cand_kw_counter[token]) for token in ref_kw_counter)
+    keyword_recall = (
+        kw_overlap / sum(ref_kw_counter.values()) if ref_kw_counter else None
+    )
+
+    return {
+        "reference_shared_images": shared_images,
+        "reference_token_recall": token_recall,
+        "reference_token_precision": token_precision,
+        "reference_keyword_recall": keyword_recall,
+        "reference_tokens": sum(ref_counter.values()),
+        "candidate_tokens": sum(cand_counter.values()),
+    }
+
+
 def _ensure_output_dir(path: Path | None, model: str) -> Path:
     if path is not None:
         output_dir = path
@@ -426,6 +541,7 @@ def run_benchmark(
     ollama_load_poll_attempts: int,
     manage_model_loading: bool,
     ground_truth_path: Path | None,
+    reference_per_image_csv: Path | None,
     limit: int | None,
 ) -> dict[str, Any]:
     image_paths = sorted(Path(path) for path in glob.glob(input_glob))
@@ -579,7 +695,29 @@ def run_benchmark(
         "api_base_url": api_base_url,
         "language_hint": language_hint,
         "ollama_think": ollama_think,
+        "reference_per_image_csv": str(reference_per_image_csv.resolve())
+        if reference_per_image_csv
+        else "",
+        "reference_shared_images": None,
+        "reference_token_recall": None,
+        "reference_token_precision": None,
+        "reference_keyword_recall": None,
+        "reference_tokens": None,
+        "candidate_tokens": None,
     }
+
+    if reference_per_image_csv is not None:
+        if not reference_per_image_csv.exists():
+            raise FileNotFoundError(
+                f"Reference per-image CSV does not exist: {reference_per_image_csv}"
+            )
+        reference_rows = _load_per_image_csv(reference_per_image_csv)
+        candidate_rows = {
+            row["image_name"]: {key: str(value) for key, value in row.items()}
+            for row in per_image_rows
+        }
+        reference_metrics = compute_reference_overlap_metrics(reference_rows, candidate_rows)
+        summary.update(reference_metrics)
 
     _write_csv(
         destination / "per_image.csv",
@@ -722,6 +860,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional path to ground-truth file (.json or .csv).",
     )
     parser.add_argument(
+        "--reference-per-image-csv",
+        default="",
+        help=(
+            "Optional per_image.csv from another run (e.g. Paddle) for layout-agnostic "
+            "token/keyword overlap metrics."
+        ),
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -736,6 +882,9 @@ def main(argv: list[str] | None = None) -> int:
 
     output_dir = Path(args.output_dir) if args.output_dir else None
     ground_truth_path = Path(args.ground_truth) if args.ground_truth else None
+    reference_per_image_csv = (
+        Path(args.reference_per_image_csv) if args.reference_per_image_csv else None
+    )
     summary = run_benchmark(
         input_glob=args.input_glob,
         output_dir=output_dir,
@@ -753,6 +902,7 @@ def main(argv: list[str] | None = None) -> int:
         ollama_load_poll_attempts=args.ollama_load_poll_attempts,
         manage_model_loading=args.manage_model_loading,
         ground_truth_path=ground_truth_path,
+        reference_per_image_csv=reference_per_image_csv,
         limit=args.limit,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))

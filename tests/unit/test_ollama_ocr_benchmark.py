@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from snapgit.ocr_benchmark.ollama_ocr_benchmark import (
+    build_arg_parser,
     build_ollama_options_payload,
     build_ollama_reasoning_payload,
     build_ocr_prompt,
+    compute_reference_overlap_metrics,
     extract_json_object_from_text,
     is_ollama_api_base_url,
     parse_ocr_response,
@@ -70,3 +72,27 @@ def test_build_ollama_options_payload_prefers_num_predict_override() -> None:
         ollama_num_ctx=8192,
     )
     assert options == {"temperature": 0.0, "num_predict": 2048, "num_ctx": 8192}
+
+
+def test_compute_reference_overlap_metrics_basic() -> None:
+    reference = {
+        "a.png": {"status": "ok", "predicted_text": "Ala ma kota"},
+        "b.png": {"status": "ok", "predicted_text": "Numer 221 DNS Secondary"},
+    }
+    candidate = {
+        "a.png": {"status": "ok", "predicted_text": "Ala ma kota"},
+        "b.png": {"status": "ok", "predicted_text": "Numer 221 DNS"},
+    }
+
+    metrics = compute_reference_overlap_metrics(reference, candidate)
+    assert metrics["reference_shared_images"] == 2
+    assert metrics["reference_token_recall"] is not None
+    assert metrics["reference_token_precision"] is not None
+    assert metrics["reference_keyword_recall"] is not None
+    assert float(metrics["reference_token_recall"]) < 1.0
+
+
+def test_build_arg_parser_accepts_reference_per_image_csv() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args(["--model", "qwen2.5vl:7b", "--reference-per-image-csv", "x.csv"])
+    assert args.reference_per_image_csv == "x.csv"
