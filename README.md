@@ -96,4 +96,4 @@ uv run pytest tests/unit/test_docs_exist.py -v
 
 ## License
 
-MIT (see `LICENSE`).
+CC0 1.0 Universal (see `LICENSE`).
