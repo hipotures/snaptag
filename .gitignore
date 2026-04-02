@@ -56,13 +56,7 @@ htmlcov/
 *.db-shm
 
 # SnapGit runtime data
-/data/inbox/
-/data/screenshots/
-/data/artifacts/
-/data/exports/
-/data/db/
-/data/index/
-/data/cache/
+/data/
 
 # Model artifacts
 *.safetensors
