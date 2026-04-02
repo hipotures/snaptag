@@ -1,15 +1,34 @@
-# SnapGit Backend (Experimental)
+# SnapTag (Experimental) - Backend Repository
 
-Local-first backend for screenshot ingest, OCR/index pipeline, and search.
+SnapTag is a local-first screenshot memory system for a single user.
+Goal: turn a stream of screenshots into searchable, structured memory and action suggestions.
+
+This repository currently contains the backend service (codename: `snapgit`) and OCR benchmarking tooling.
 
 ## Project Status
 
 This project is in an active experimental phase.
 
+- Product direction is defined, but implementation is still phase-1 and backend-first.
 - Core backend flow works locally (ingest -> OCR -> index -> search).
 - API and schema are still evolving.
 - OCR model selection and benchmarking are in progress.
 - Expect breaking changes while phase 1 is being refined.
+
+## What The Project Should Do
+
+End-state product flow:
+
+1. Collect screenshots from user devices (primary source: Android).
+2. Ingest screenshots into local storage on Linux backend.
+3. Run OCR and extract searchable text/entities.
+4. Build a search index and provide fast retrieval.
+5. Generate optional action suggestions based on extracted content.
+
+Current repository scope:
+
+- Implemented here: backend API, ingest pipeline, search indexing, OCR benchmarking.
+- Not implemented here as production components: mobile app/client UX and full product UI.
 
 ## What Is Implemented
 
