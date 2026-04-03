@@ -165,6 +165,17 @@ def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _atomic_write_jsonl(path: Path, rows: list[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_path, path)
+
+
 def _append_csv_row(path: Path, row: Mapping[str, Any], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not path.exists() or path.stat().st_size == 0
@@ -175,6 +186,54 @@ def _append_csv_row(path: Path, row: Mapping[str, Any], fieldnames: list[str]) -
         writer.writerow({key: row.get(key, "") for key in fieldnames})
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _jsonl_row_to_csv_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    categories: list[Mapping[str, Any]] = []
+    categories_raw = row.get("categories")
+    if isinstance(categories_raw, list):
+        categories = [item for item in categories_raw if isinstance(item, Mapping)]
+
+    if categories:
+        categories_json = json.dumps(categories, ensure_ascii=False)
+        category_words_pl = "|".join(
+            str(item.get("pl", "")).strip().lower() for item in categories if item.get("pl")
+        )
+        category_words_en = "|".join(
+            str(item.get("en", "")).strip().lower() for item in categories if item.get("en")
+        )
+    else:
+        categories_json = str(row.get("categories_json", "") or "")
+        category_words_pl = str(row.get("category_words_pl", "") or "")
+        category_words_en = str(row.get("category_words_en", "") or "")
+
+    return {
+        "image_name": str(row.get("image_name", "") or ""),
+        "image_path": str(row.get("image_path", "") or ""),
+        "status": str(row.get("status", "") or ""),
+        "app_hint_from_filename": str(row.get("app_hint_from_filename", "") or ""),
+        "summary_pl": str(row.get("summary_pl", "") or ""),
+        "summary_en": str(row.get("summary_en", "") or ""),
+        "ocr_excerpt": str(row.get("ocr_excerpt", "") or ""),
+        "categories_json": categories_json,
+        "category_words_pl": category_words_pl,
+        "category_words_en": category_words_en,
+        "elapsed_seconds": row.get("elapsed_seconds", ""),
+        "error": str(row.get("error", "") or ""),
+    }
+
+
+def _atomic_write_per_image_csv(path: Path, rows: list[Mapping[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_CSV_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(_jsonl_row_to_csv_row(row))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary_path, path)
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -220,6 +279,41 @@ def _load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"invalid JSONL row at line {index}: expected object")
             rows.append(payload)
     return rows
+
+
+def _dedupe_rows_by_image_path(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    deduped: list[dict[str, Any]] = []
+    index_by_path: dict[str, int] = {}
+    for row in rows:
+        image_path = str(row.get("image_path", "") or "")
+        if not image_path:
+            continue
+        if image_path in index_by_path:
+            deduped[index_by_path[image_path]] = row
+        else:
+            index_by_path[image_path] = len(deduped)
+            deduped.append(row)
+    return deduped, index_by_path
+
+
+def _select_image_queue(
+    *,
+    image_paths: list[Path],
+    rows: list[Mapping[str, Any]],
+    row_index_by_path: Mapping[str, int],
+    retry_failed_only: bool,
+) -> list[Path]:
+    if retry_failed_only:
+        selected: list[Path] = []
+        for image_path in image_paths:
+            image_key = str(image_path)
+            row_index = row_index_by_path.get(image_key)
+            if row_index is None:
+                continue
+            if str(rows[row_index].get("status", "")).lower() == "error":
+                selected.append(image_path)
+        return selected
+    return [path for path in image_paths if str(path) not in row_index_by_path]
 
 
 def _count_by_status(rows: list[Mapping[str, Any]]) -> tuple[int, int]:
@@ -462,6 +556,7 @@ def run_categorization(
     resume: bool,
     save_raw: bool,
     progress: bool,
+    retry_failed_only: bool,
 ) -> dict[str, Any]:
     image_paths = sorted(Path(path) for path in glob.glob(input_glob))
     if limit is not None:
@@ -481,9 +576,23 @@ def run_categorization(
             "Use --resume or provide a different --output-dir."
         )
 
-    existing_rows = _load_jsonl_rows(results_jsonl_path) if resume else []
-    seen_image_paths = {str(row.get("image_path", "")) for row in existing_rows}
-    image_queue = [path for path in image_paths if str(path) not in seen_image_paths]
+    existing_rows_raw = _load_jsonl_rows(results_jsonl_path) if resume else []
+    existing_rows, row_index_by_path = _dedupe_rows_by_image_path(existing_rows_raw)
+
+    if retry_failed_only and not resume:
+        raise RuntimeError("--retry-failed-only requires --resume.")
+    if retry_failed_only and not existing_rows:
+        raise RuntimeError(
+            f"No existing rows found in {results_jsonl_path}. "
+            "Run a full categorization first or disable --retry-failed-only."
+        )
+
+    image_queue = _select_image_queue(
+        image_paths=image_paths,
+        rows=existing_rows,
+        row_index_by_path=row_index_by_path,
+        retry_failed_only=retry_failed_only,
+    )
 
     if not image_queue and existing_rows:
         summary = _build_summary(
@@ -526,8 +635,8 @@ def run_categorization(
             avg = (sum(elapsed_samples) / len(elapsed_samples)) if elapsed_samples else None
             _emit_progress(
                 _render_progress_line(
-                    processed=len(existing_rows),
-                    total=len(image_paths),
+                    processed=len(existing_rows) if not retry_failed_only else 0,
+                    total=len(image_paths) if not retry_failed_only else len(image_queue),
                     ok_count=ok_count,
                     failed_count=failed_count,
                     average_seconds=avg,
@@ -536,18 +645,19 @@ def run_categorization(
             )
         return summary
 
-    elapsed_values = [
-        float(row["elapsed_seconds"])
-        for row in existing_rows
-        if row.get("status") == "ok" and row.get("elapsed_seconds") not in {"", None}
-    ]
-    runtime_samples = [
-        float(row["elapsed_seconds"])
-        for row in existing_rows
-        if row.get("elapsed_seconds") not in {"", None}
-    ]
+    runtime_samples = (
+        [
+            float(row["elapsed_seconds"])
+            for row in existing_rows
+            if row.get("elapsed_seconds") not in {"", None}
+        ]
+        if not retry_failed_only
+        else []
+    )
     rows: list[dict[str, Any]] = list(existing_rows)
     last_image_name = ""
+    retry_processed = 0
+    progress_total = len(image_paths) if not retry_failed_only else len(image_queue)
 
     _atomic_write_json(
         state_path,
@@ -569,8 +679,8 @@ def run_categorization(
         average_seconds = (sum(runtime_samples) / len(runtime_samples)) if runtime_samples else None
         _emit_progress(
             _render_progress_line(
-                processed=len(rows),
-                total=len(image_paths),
+                processed=len(rows) if not retry_failed_only else retry_processed,
+                total=progress_total,
                 ok_count=ok_count,
                 failed_count=failed_count,
                 average_seconds=average_seconds,
@@ -682,10 +792,24 @@ def run_categorization(
                             raw_text, encoding="utf-8"
                         )
 
-                _append_jsonl(results_jsonl_path, row_for_jsonl)
-                _append_csv_row(per_image_csv_path, row, _CSV_FIELDS)
-                rows.append(row_for_jsonl)
+                if retry_failed_only:
+                    image_key = str(image_path)
+                    row_index = row_index_by_path.get(image_key)
+                    if row_index is None:
+                        row_index_by_path[image_key] = len(rows)
+                        rows.append(row_for_jsonl)
+                    else:
+                        rows[row_index] = row_for_jsonl
+                    _atomic_write_jsonl(results_jsonl_path, rows)
+                    _atomic_write_per_image_csv(per_image_csv_path, rows)
+                else:
+                    _append_jsonl(results_jsonl_path, row_for_jsonl)
+                    _append_csv_row(per_image_csv_path, row, _CSV_FIELDS)
+                    row_index_by_path[str(image_path)] = len(rows)
+                    rows.append(row_for_jsonl)
                 last_image_name = image_name
+                if retry_failed_only:
+                    retry_processed += 1
                 if progress:
                     ok_count, failed_count = _count_by_status(rows)
                     average_seconds = (
@@ -693,8 +817,8 @@ def run_categorization(
                     )
                     _emit_progress(
                         _render_progress_line(
-                            processed=len(rows),
-                            total=len(image_paths),
+                            processed=len(rows) if not retry_failed_only else retry_processed,
+                            total=progress_total,
                             ok_count=ok_count,
                             failed_count=failed_count,
                             average_seconds=average_seconds,
@@ -729,8 +853,8 @@ def run_categorization(
             average_seconds = (sum(runtime_samples) / len(runtime_samples)) if runtime_samples else None
             _emit_progress(
                 _render_progress_line(
-                    processed=len(rows),
-                    total=len(image_paths),
+                    processed=len(rows) if not retry_failed_only else retry_processed,
+                    total=progress_total,
                     ok_count=ok_count,
                     failed_count=failed_count,
                     average_seconds=average_seconds,
@@ -738,6 +862,11 @@ def run_categorization(
                 final=True,
             )
 
+    elapsed_values = [
+        float(row["elapsed_seconds"])
+        for row in rows
+        if row.get("status") == "ok" and row.get("elapsed_seconds") not in {"", None}
+    ]
     summary = _build_summary(
         destination=destination,
         input_glob=input_glob,
@@ -885,6 +1014,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Show live progress in stderr. Default: enabled.",
     )
+    parser.add_argument(
+        "--retry-failed-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Retry only rows with status=error from existing results.jsonl in --output-dir. "
+            "When enabled, matching rows are replaced in-place instead of appended."
+        ),
+    )
     return parser
 
 
@@ -913,6 +1051,7 @@ def main(argv: list[str] | None = None) -> int:
         resume=args.resume,
         save_raw=args.save_raw,
         progress=args.progress,
+        retry_failed_only=args.retry_failed_only,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

@@ -92,6 +92,7 @@ bash scripts/run_ollama_ocr_benchmark.sh --input-glob "/tmp/scr/*.png" --model q
 bash scripts/run_llamacpp_ocr_benchmark.sh --input-glob "/tmp/scr/*.png" --model qwen2.5-vl-instruct
 bash scripts/run_vllm_ocr_benchmark.sh --input-glob "/tmp/scr/*.png" --model Qwen/Qwen2.5-VL-7B-Instruct
 bash scripts/run_ollama_screenshot_categorizer.sh --input-glob "/tmp/Screenshots/*" --model qwen3.5:9b
+bash scripts/run_ollama_screenshot_categorizer.sh --input-glob "/tmp/Screenshots/*" --model qwen3.5:9b --output-dir data/ocr_categories/ollama/qwen3_5_9b_screenshots --retry-failed-only
 ```
 
 Notes:

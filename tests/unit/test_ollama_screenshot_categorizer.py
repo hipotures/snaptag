@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from snapgit.ocr_benchmark.ollama_screenshot_categorizer import (
+    _dedupe_rows_by_image_path,
     _redact_request_payload,
+    _select_image_queue,
     build_arg_parser,
     build_category_prompt,
     extract_app_hint_from_filename,
@@ -76,9 +80,12 @@ def test_parse_category_response_normalizes_and_deduplicates() -> None:
 
 def test_build_arg_parser_accepts_resume_flags() -> None:
     parser = build_arg_parser()
-    args = parser.parse_args(["--model", "qwen3.5:9b", "--no-resume", "--no-progress"])
+    args = parser.parse_args(
+        ["--model", "qwen3.5:9b", "--no-resume", "--no-progress", "--retry-failed-only"]
+    )
     assert args.resume is False
     assert args.progress is False
+    assert args.retry_failed_only is True
 
 
 def test_redact_request_payload_replaces_images_with_metadata() -> None:
@@ -95,3 +102,33 @@ def test_redact_request_payload_replaces_images_with_metadata() -> None:
         {"index": 0, "redacted": True, "encoding": "base64", "char_length": 6},
         {"index": 1, "redacted": True, "encoding": "base64", "char_length": 3},
     ]
+
+
+def test_dedupe_rows_by_image_path_keeps_last_row() -> None:
+    rows = [
+        {"image_path": "/tmp/a.png", "status": "error"},
+        {"image_path": "/tmp/b.png", "status": "ok"},
+        {"image_path": "/tmp/a.png", "status": "ok"},
+    ]
+    deduped, index_by_path = _dedupe_rows_by_image_path(rows)
+    assert deduped == [
+        {"image_path": "/tmp/a.png", "status": "ok"},
+        {"image_path": "/tmp/b.png", "status": "ok"},
+    ]
+    assert index_by_path == {"/tmp/a.png": 0, "/tmp/b.png": 1}
+
+
+def test_select_image_queue_retry_failed_only_filters_to_errors() -> None:
+    image_paths = [Path("/tmp/a.png"), Path("/tmp/b.png"), Path("/tmp/c.png")]
+    rows = [
+        {"image_path": "/tmp/a.png", "status": "error"},
+        {"image_path": "/tmp/b.png", "status": "ok"},
+    ]
+    row_index_by_path = {"/tmp/a.png": 0, "/tmp/b.png": 1}
+    queue = _select_image_queue(
+        image_paths=image_paths,
+        rows=rows,
+        row_index_by_path=row_index_by_path,
+        retry_failed_only=True,
+    )
+    assert queue == [Path("/tmp/a.png")]
