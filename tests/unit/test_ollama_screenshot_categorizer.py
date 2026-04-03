@@ -6,6 +6,7 @@ import pytest
 
 from snapgit.ocr_benchmark.ollama_screenshot_categorizer import (
     _dedupe_rows_by_image_path,
+    _load_input_paths,
     _redact_request_payload,
     _select_image_queue,
     build_arg_parser,
@@ -34,18 +35,17 @@ def test_build_category_prompt_contains_schema_and_hint() -> None:
     prompt = build_category_prompt(language_hint="pl,en", app_hint_from_filename="TikTok")
     assert '"summary_pl"' in prompt
     assert '"summary_en"' in prompt
-    assert '"ocr_excerpt"' in prompt
     assert '"categories"' in prompt
     assert "5 to 7 unique category pairs" in prompt
     assert "Filename app hint" in prompt
     assert "TikTok" in prompt
+    assert "Do not transcribe text from the image." in prompt
 
 
 def test_parse_category_response_requires_minimum_categories() -> None:
     payload = {
         "summary_pl": "ekran z social media",
         "summary_en": "social media screen",
-        "ocr_excerpt": "obserwuj",
         "categories": [
             {"pl": "media społecznościowe", "en": "social media"},
             {"pl": "wideo", "en": "video"},
@@ -61,7 +61,6 @@ def test_parse_category_response_normalizes_and_deduplicates() -> None:
     payload = {
         "summary_pl": "",
         "summary_en": "",
-        "ocr_excerpt": "For you",
         "categories": [
             {"pl": "Media Społecznościowe", "en": "Social Media"},
             {"pl": "Wideo", "en": "Video"},
@@ -81,11 +80,20 @@ def test_parse_category_response_normalizes_and_deduplicates() -> None:
 def test_build_arg_parser_accepts_resume_flags() -> None:
     parser = build_arg_parser()
     args = parser.parse_args(
-        ["--model", "qwen3.5:9b", "--no-resume", "--no-progress", "--retry-failed-only"]
+        [
+            "--model",
+            "qwen3.5:9b",
+            "--no-resume",
+            "--no-progress",
+            "--retry-failed-only",
+            "--ollama-seed",
+            "123",
+        ]
     )
     assert args.resume is False
     assert args.progress is False
     assert args.retry_failed_only is True
+    assert args.ollama_seed == 123
 
 
 def test_redact_request_payload_replaces_images_with_metadata() -> None:
@@ -132,3 +140,19 @@ def test_select_image_queue_retry_failed_only_filters_to_errors() -> None:
         retry_failed_only=True,
     )
     assert queue == [Path("/tmp/a.png")]
+
+
+def test_load_input_paths_supports_list_file(tmp_path: Path) -> None:
+    image_a = tmp_path / "b.png"
+    image_b = tmp_path / "a.png"
+    image_a.write_bytes(b"x")
+    image_b.write_bytes(b"x")
+    list_file = tmp_path / "images.txt"
+    list_file.write_text(str(image_a) + "\n" + str(image_b) + "\n", encoding="utf-8")
+
+    loaded = _load_input_paths(
+        input_glob=str(tmp_path / "*.png"),
+        input_list_file=list_file,
+        limit=None,
+    )
+    assert loaded == [image_b, image_a]

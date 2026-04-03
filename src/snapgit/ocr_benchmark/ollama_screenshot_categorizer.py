@@ -65,7 +65,6 @@ def build_category_prompt(language_hint: str, app_hint_from_filename: str) -> st
         "{\n"
         '  "summary_pl": string,\n'
         '  "summary_en": string,\n'
-        '  "ocr_excerpt": string,\n'
         '  "categories": [\n'
         "    {\n"
         '      "pl": string,\n'
@@ -80,9 +79,10 @@ def build_category_prompt(language_hint: str, app_hint_from_filename: str) -> st
         "- Provide Polish and English equivalents for each category.\n"
         "- Prefer generic intent-level labels (e.g. social media, chat, shopping, banking, maps, game).\n"
         "- Do not invent categories unrelated to visible content.\n"
-        "- If OCR text is present, include only concise key text in ocr_excerpt.\n"
-        "- If text is unreadable, keep ocr_excerpt as an empty string.\n"
         "- summary_pl and summary_en should be one short sentence each.\n"
+        "- Do not transcribe text from the image.\n"
+        "- Do not copy exact long strings, code blocks, or IDs from the image.\n"
+        "- Use abstract description only, e.g. 'bardzo długi ciąg znaków alfanumerycznych'.\n"
         "- Do not output markdown.\n"
         f"- Language hint for visible text: {language_hint}.\n"
         f"{app_hint_line}"
@@ -92,7 +92,6 @@ def build_category_prompt(language_hint: str, app_hint_from_filename: str) -> st
 def parse_category_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     summary_pl = str(payload.get("summary_pl", "") or "").strip()
     summary_en = str(payload.get("summary_en", "") or "").strip()
-    ocr_excerpt = str(payload.get("ocr_excerpt", "") or "").strip()
 
     categories_raw = payload.get("categories", [])
     if not isinstance(categories_raw, list):
@@ -126,7 +125,6 @@ def parse_category_response(payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "summary_pl": summary_pl,
         "summary_en": summary_en,
-        "ocr_excerpt": ocr_excerpt,
         "categories": categories,
     }
 
@@ -279,6 +277,30 @@ def _load_jsonl_rows(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"invalid JSONL row at line {index}: expected object")
             rows.append(payload)
     return rows
+
+
+def _load_input_paths(
+    *,
+    input_glob: str,
+    input_list_file: Path | None,
+    limit: int | None,
+) -> list[Path]:
+    if input_list_file is not None:
+        if not input_list_file.exists():
+            raise FileNotFoundError(f"Input list file does not exist: {input_list_file}")
+        paths: list[Path] = []
+        with input_list_file.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped:
+                    paths.append(Path(stripped))
+        image_paths = sorted(paths)
+    else:
+        image_paths = sorted(Path(path) for path in glob.glob(input_glob))
+
+    if limit is not None:
+        image_paths = image_paths[:limit]
+    return image_paths
 
 
 def _dedupe_rows_by_image_path(rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -461,6 +483,7 @@ def _run_ollama_categorization(
     max_output_tokens: int | None,
     ollama_num_predict: int | None,
     ollama_num_ctx: int | None,
+    ollama_seed: int | None,
     ollama_keep_alive: str,
     ollama_think: str,
 ) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -469,6 +492,15 @@ def _run_ollama_categorization(
         app_hint_from_filename=app_hint_from_filename,
     )
     image_b64 = _image_to_base64(image_path)
+
+    options = build_ollama_options_payload(
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        ollama_num_predict=ollama_num_predict,
+        ollama_num_ctx=ollama_num_ctx,
+    )
+    if ollama_seed is not None:
+        options["seed"] = int(ollama_seed)
 
     payload: dict[str, Any] = {
         "model": model,
@@ -487,7 +519,6 @@ def _run_ollama_categorization(
             "properties": {
                 "summary_pl": {"type": "string"},
                 "summary_en": {"type": "string"},
-                "ocr_excerpt": {"type": "string"},
                 "categories": {
                     "type": "array",
                     "minItems": 5,
@@ -503,15 +534,10 @@ def _run_ollama_categorization(
                     },
                 },
             },
-            "required": ["summary_pl", "summary_en", "ocr_excerpt", "categories"],
+            "required": ["summary_pl", "summary_en", "categories"],
             "additionalProperties": False,
         },
-        "options": build_ollama_options_payload(
-            temperature=temperature,
-            max_output_tokens=max_output_tokens,
-            ollama_num_predict=ollama_num_predict,
-            ollama_num_ctx=ollama_num_ctx,
-        ),
+        "options": options,
     }
     payload.update(build_ollama_reasoning_payload(ollama_think))
 
@@ -538,6 +564,7 @@ def _run_ollama_categorization(
 def run_categorization(
     *,
     input_glob: str,
+    input_list_file: Path | None,
     output_dir: Path | None,
     api_base_url: str,
     model: str,
@@ -547,6 +574,7 @@ def run_categorization(
     max_output_tokens: int | None,
     ollama_num_predict: int | None,
     ollama_num_ctx: int | None,
+    ollama_seed: int | None,
     ollama_keep_alive: str,
     ollama_think: str,
     ollama_load_poll_seconds: float,
@@ -558,10 +586,14 @@ def run_categorization(
     progress: bool,
     retry_failed_only: bool,
 ) -> dict[str, Any]:
-    image_paths = sorted(Path(path) for path in glob.glob(input_glob))
-    if limit is not None:
-        image_paths = image_paths[:limit]
+    image_paths = _load_input_paths(
+        input_glob=input_glob,
+        input_list_file=input_list_file,
+        limit=limit,
+    )
     if not image_paths:
+        if input_list_file is not None:
+            raise RuntimeError(f"No input images found in list file: {input_list_file}")
         raise RuntimeError(f"No input images found for pattern: {input_glob}")
 
     destination = _ensure_output_dir(output_dir, model)
@@ -737,6 +769,7 @@ def run_categorization(
                     max_output_tokens=max_output_tokens,
                     ollama_num_predict=ollama_num_predict,
                     ollama_num_ctx=ollama_num_ctx,
+                    ollama_seed=ollama_seed,
                     ollama_keep_alive=ollama_keep_alive,
                     ollama_think=ollama_think,
                 )
@@ -753,7 +786,7 @@ def run_categorization(
                         "status": "ok",
                         "summary_pl": parsed["summary_pl"],
                         "summary_en": parsed["summary_en"],
-                        "ocr_excerpt": parsed["ocr_excerpt"],
+                        "ocr_excerpt": "",
                         "categories_json": json.dumps(categories, ensure_ascii=False),
                         "category_words_pl": "|".join(category_words_pl),
                         "category_words_en": "|".join(category_words_en),
@@ -765,12 +798,11 @@ def run_categorization(
                         "status": "ok",
                         "summary_pl": parsed["summary_pl"],
                         "summary_en": parsed["summary_en"],
-                        "ocr_excerpt": parsed["ocr_excerpt"],
+                        "ocr_excerpt": "",
                         "categories": categories,
                         "elapsed_seconds": elapsed,
                     }
                 )
-                elapsed_values.append(elapsed)
             except Exception as exc:
                 elapsed = time.perf_counter() - start_time
                 row["elapsed_seconds"] = elapsed
@@ -912,6 +944,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Glob pattern for input images.",
     )
     parser.add_argument(
+        "--input-list-file",
+        default="",
+        help="Optional newline-delimited file with absolute input image paths.",
+    )
+    parser.add_argument(
         "--output-dir",
         default="",
         help="Output directory. Default: data/ocr_categories/ollama/<model>/<timestamp>.",
@@ -960,6 +997,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional Ollama num_ctx override.",
+    )
+    parser.add_argument(
+        "--ollama-seed",
+        type=int,
+        default=None,
+        help="Optional Ollama seed passed as options.seed.",
     )
     parser.add_argument(
         "--ollama-think",
@@ -1031,8 +1074,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     output_dir = Path(args.output_dir) if args.output_dir else None
+    input_list_file = Path(args.input_list_file) if args.input_list_file else None
     summary = run_categorization(
         input_glob=args.input_glob,
+        input_list_file=input_list_file,
         output_dir=output_dir,
         api_base_url=args.api_base_url,
         model=args.model,
@@ -1042,6 +1087,7 @@ def main(argv: list[str] | None = None) -> int:
         max_output_tokens=args.max_output_tokens,
         ollama_num_predict=args.ollama_num_predict,
         ollama_num_ctx=args.ollama_num_ctx,
+        ollama_seed=args.ollama_seed,
         ollama_keep_alive=args.ollama_keep_alive,
         ollama_think=args.ollama_think,
         ollama_load_poll_seconds=args.ollama_load_poll_seconds,

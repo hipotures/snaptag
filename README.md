@@ -91,7 +91,7 @@ bash scripts/run_paddleocr_benchmark.sh --input-glob "/tmp/scr/*.png"
 bash scripts/run_ollama_ocr_benchmark.sh --input-glob "/tmp/scr/*.png" --model qwen2.5vl:7b
 bash scripts/run_llamacpp_ocr_benchmark.sh --input-glob "/tmp/scr/*.png" --model qwen2.5-vl-instruct
 bash scripts/run_vllm_ocr_benchmark.sh --input-glob "/tmp/scr/*.png" --model Qwen/Qwen2.5-VL-7B-Instruct
-bash scripts/run_ollama_screenshot_categorizer.sh --input-glob "/tmp/Screenshots/*" --model qwen3.5:9b
+bash scripts/run_ollama_screenshot_categorizer.sh --input-glob "/tmp/Screenshots/*" --model qwen3.5:9b --ollama-seed 42
 bash scripts/run_ollama_screenshot_categorizer.sh --input-glob "/tmp/Screenshots/*" --model qwen3.5:9b --output-dir data/ocr_categories/ollama/qwen3_5_9b_screenshots --retry-failed-only
 ```
 
@@ -101,6 +101,12 @@ Notes:
 - Others default to `.venv/bin/python`.
 - Some benchmark engines require external services running locally (Ollama / OpenAI-compatible server).
 - Screenshot categorizer writes incremental checkpoints after each image (`results.jsonl`, `state.json`), so interrupted runs can be resumed safely.
+- Screenshot categorizer is description-first at this stage (summary + categories), without OCR transcription fields.
+- `scripts/run_ollama_screenshot_categorizer.sh` pre-filters inputs before model calls:
+  - file size must be `>500` bytes,
+  - valid image type must be PNG/JPEG/GIF,
+  - max image dimension must be `>50` pixels,
+  - low-variance/uniform images are rejected.
 
 ## Tests
 
